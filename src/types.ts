@@ -6,6 +6,34 @@
  */
 
 // ============================================================================
+// Logger
+// ============================================================================
+
+/** Structured logger interface used throughout the SDK. */
+export interface Logger {
+  debug: (msg: string, ...args: unknown[]) => void;
+  info: (msg: string, ...args: unknown[]) => void;
+  warn: (msg: string, ...args: unknown[]) => void;
+  error: (msg: string, ...args: unknown[]) => void;
+}
+
+/** A no-op logger that silently discards all messages. */
+export const noopLogger: Logger = {
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+};
+
+/** A logger that writes to the console. */
+export const consoleLogger: Logger = {
+  debug: (msg, ...args) => console.debug(`[x402-miden] ${msg}`, ...args),
+  info: (msg, ...args) => console.info(`[x402-miden] ${msg}`, ...args),
+  warn: (msg, ...args) => console.warn(`[x402-miden] ${msg}`, ...args),
+  error: (msg, ...args) => console.error(`[x402-miden] ${msg}`, ...args),
+};
+
+// ============================================================================
 // Agent Wallet Configuration
 // ============================================================================
 
@@ -23,6 +51,8 @@ export interface AgentWalletConfig {
   seed?: Uint8Array;
   /** Optional store name for isolating multiple agents in the same environment. */
   storeName?: string;
+  /** Optional logger for diagnostic output. */
+  logger?: Logger;
 }
 
 /** Known Miden network identifiers. */
@@ -131,4 +161,6 @@ export interface MidenFetchOptions extends RequestInit {
   allowedNetworks?: string[];
   /** If true, do not auto-pay — just return the 402 response. */
   dryRun?: boolean;
+  /** Optional logger for diagnostic output. */
+  logger?: Logger;
 }

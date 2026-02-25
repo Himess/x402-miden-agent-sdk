@@ -23,10 +23,14 @@ import type {
   AgentWalletConfig,
   FungibleAssetInfo,
   WalletBalance,
+  Logger,
 } from "./types.js";
 
 /** Default Miden testnet RPC endpoint. */
 const DEFAULT_RPC_URL = "https://rpc.testnet.miden.io";
+
+/** Regex for validating hex-encoded IDs (with or without 0x prefix). */
+const HEX_RE = /^(0x)?[0-9a-fA-F]+$/;
 
 /**
  * A private wallet for AI agents on Miden.
@@ -49,11 +53,13 @@ export class MidenAgentWallet {
   private client: WebClient;
   private account: Account;
   private _accountId: string;
+  private log: Logger;
 
-  private constructor(client: WebClient, account: Account) {
+  private constructor(client: WebClient, account: Account, logger?: Logger) {
     this.client = client;
     this.account = account;
     this._accountId = account.id().toString();
+    this.log = logger ?? noopLogger;
   }
 
   /** The agent's Miden account ID (hex string). */
@@ -73,10 +79,13 @@ export class MidenAgentWallet {
    * (private by default), and syncs with the network.
    */
   static async create(config: AgentWalletConfig = {}): Promise<MidenAgentWallet> {
+    const log = config.logger ?? noopLogger;
     const rpcUrl = config.rpcUrl ?? DEFAULT_RPC_URL;
     const storageMode = config.publicStorage
       ? AccountStorageMode.public()
       : AccountStorageMode.private();
+
+    log.info("Creating new agent wallet", { rpcUrl, publicStorage: !!config.publicStorage });
 
     const client = await WebClient.createClient(
       rpcUrl,
@@ -95,7 +104,9 @@ export class MidenAgentWallet {
     // Initial sync to register the account with the network
     await client.syncState();
 
-    return new MidenAgentWallet(client, account);
+    const wallet = new MidenAgentWallet(client, account, log);
+    log.info("Agent wallet created", { accountId: wallet.accountId });
+    return wallet;
   }
 
   /**
@@ -108,7 +119,10 @@ export class MidenAgentWallet {
     accountIdHex: string,
     config: AgentWalletConfig = {},
   ): Promise<MidenAgentWallet> {
+    const log = config.logger ?? noopLogger;
     const rpcUrl = config.rpcUrl ?? DEFAULT_RPC_URL;
+
+    log.info("Restoring agent wallet", { accountIdHex, rpcUrl });
 
     const client = await WebClient.createClient(
       rpcUrl,
@@ -143,7 +157,7 @@ export class MidenAgentWallet {
       );
     }
 
-    return new MidenAgentWallet(client, account);
+    return new MidenAgentWallet(client, account, log);
   }
 
   /**
@@ -205,6 +219,19 @@ export class MidenAgentWallet {
     amount: bigint,
     noteType: "public" | "private" = "public",
   ): Promise<string> {
+    // Input validation
+    if (amount <= 0n) {
+      throw new Error("Amount must be positive");
+    }
+    if (!HEX_RE.test(recipientId)) {
+      throw new Error("Invalid hex format for recipientId");
+    }
+    if (!HEX_RE.test(faucetId)) {
+      throw new Error("Invalid hex format for faucetId");
+    }
+
+    this.log.info("Sending payment", { recipientId, faucetId, amount: amount.toString(), noteType });
+
     let senderAccountId, targetAccountId, faucetAccountId;
     try {
       senderAccountId = AccountId.fromHex(this._accountId);
@@ -232,6 +259,7 @@ export class MidenAgentWallet {
       txRequest,
     );
 
+    this.log.info("Payment sent", { transactionId: txId.toString() });
     return txId.toString();
   }
 
@@ -253,6 +281,23 @@ export class MidenAgentWallet {
     amount: bigint,
     noteType: "public" | "private" = "public",
   ): Promise<{ provenTransactionHex: string; transactionId: string }> {
+    // Input validation
+    if (amount <= 0n) {
+      throw new Error("Amount must be positive");
+    }
+    if (!HEX_RE.test(recipientId)) {
+      throw new Error("Invalid hex format for recipientId");
+    }
+    if (!HEX_RE.test(faucetId)) {
+      throw new Error("Invalid hex format for faucetId");
+    }
+    // recipientId is the payTo field — validate it as well
+    if (!HEX_RE.test(recipientId)) {
+      throw new Error("Invalid hex format for payTo");
+    }
+
+    this.log.info("Generating P2ID proof", { recipientId, faucetId, amount: amount.toString(), noteType });
+
     let senderAccountId, targetAccountId, faucetAccountId;
     try {
       senderAccountId = AccountId.fromHex(this._accountId);
@@ -289,6 +334,8 @@ export class MidenAgentWallet {
     const provenTxHex = bytesToHex(provenTxBytes);
     const txId = provenTx.id().toString();
 
+    this.log.info("P2ID proof generated", { transactionId: txId });
+
     return {
       provenTransactionHex: provenTxHex,
       transactionId: txId,
@@ -298,28 +345,22 @@ export class MidenAgentWallet {
   /**
    * Waits for a transaction to be included in a block.
    *
-   * Polls the network via sync until the transaction is confirmed
-   * or the timeout is reached.
+   * **Not yet implemented.** The Miden WebClient does not currently expose a
+   * transaction confirmation API, so there is no reliable way to detect when
+   * a specific transaction has been included in a block. Calling this method
+   * will always throw.
    *
-   * @param txId - Transaction ID to wait for
-   * @param timeoutMs - Maximum wait time in ms (default 60000)
+   * Track transaction confirmation manually by calling `sync()` and
+   * inspecting your account state or note status.
+   *
+   * @param _txId - Transaction ID to wait for (unused)
+   * @param _timeoutMs - Maximum wait time in ms (unused)
+   * @throws Always throws — not yet implemented.
    */
-  async waitForTransaction(txId: string, timeoutMs = 60_000): Promise<void> {
-    // TODO: Implement proper transaction confirmation polling.
-    // The WebClient doesn't expose a direct waitForTransaction method.
-    // For now, we poll sync with a delay until timeout.
-    const pollIntervalMs = 3_000;
-    const start = Date.now();
-
-    while (Date.now() - start < timeoutMs) {
-      await this.sync();
-      // TODO: Check if transaction is confirmed via getTransactions()
-      // once TransactionFilter API is available.
-      // For now, each sync brings state closer to current block.
-
-      if (Date.now() - start >= timeoutMs) break;
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    }
+  async waitForTransaction(_txId: string, _timeoutMs = 60_000): Promise<void> {
+    throw new Error(
+      "waitForTransaction is not yet implemented. Track transaction confirmation manually via syncState().",
+    );
   }
 
   /** Returns the underlying WebClient for advanced usage. */
@@ -332,6 +373,13 @@ export class MidenAgentWallet {
     this.client.terminate();
   }
 }
+
+// ============================================================================
+// Internal logger
+// ============================================================================
+
+const noop = () => {};
+const noopLogger: Logger = { debug: noop, info: noop, warn: noop, error: noop };
 
 // ============================================================================
 // Helpers

@@ -7,7 +7,10 @@
 
 import { X402PaymentHandler } from "./payment-handler.js";
 import type { MidenAgentWallet } from "./wallet.js";
-import type { MidenFetchOptions, PaymentResult } from "./types.js";
+import type { MidenFetchOptions, PaymentResult, Logger } from "./types.js";
+
+const noop = () => {};
+const noopLogger: Logger = { debug: noop, info: noop, warn: noop, error: noop };
 
 /**
  * Creates an x402-aware fetch function bound to an agent wallet.
@@ -60,14 +63,19 @@ export async function midenFetch(
     allowedFaucets,
     allowedNetworks,
     dryRun,
+    logger,
     ...fetchOptions
   } = options;
+
+  const log: Logger = logger ?? noopLogger;
 
   // First request — may return 402
   const response = await fetch(url, fetchOptions);
 
   // Not a 402 → return as-is
   if (response.status !== 402) return response;
+
+  log.info("Received 402 Payment Required", { url: String(url) });
 
   // Dry run mode — return the 402 without paying
   if (dryRun) return response;
@@ -80,16 +88,20 @@ export async function midenFetch(
     maxPayment,
     allowedFaucets,
     allowedNetworks,
+    logger: log,
   });
 
   // Try to handle the 402
+  log.info("Attempting payment for 402 response");
   const result = await handler.handlePaymentRequired(responseForParsing);
   if (!result) {
+    log.warn("No compatible payment scheme found, returning original 402");
     // Return original (unconsumed) response so caller can inspect it
     return response;
   }
 
   // Retry with the Payment header
+  log.info("Retrying request with Payment header", { transactionId: result.transactionId });
   const retryHeaders = new Headers(fetchOptions.headers);
   retryHeaders.set("Payment", result.paymentHeader);
 
@@ -133,12 +145,17 @@ export async function midenFetchWithCallback(
     allowedFaucets,
     allowedNetworks,
     dryRun,
+    logger,
     ...fetchOptions
   } = options;
+
+  const log: Logger = logger ?? noopLogger;
 
   const response = await fetch(url, fetchOptions);
 
   if (response.status !== 402 || dryRun) return response;
+
+  log.info("Received 402 Payment Required (callback mode)", { url: String(url) });
 
   // Clone before body is consumed by payment handler
   const responseForParsing = response.clone();
@@ -147,6 +164,7 @@ export async function midenFetchWithCallback(
     maxPayment,
     allowedFaucets,
     allowedNetworks,
+    logger: log,
   });
 
   const result = await handler.handlePaymentRequired(responseForParsing);
@@ -156,6 +174,7 @@ export async function midenFetchWithCallback(
   onPayment(result);
 
   // Retry with payment
+  log.info("Retrying request with Payment header (callback mode)", { transactionId: result.transactionId });
   const retryHeaders = new Headers(fetchOptions.headers);
   retryHeaders.set("Payment", result.paymentHeader);
 

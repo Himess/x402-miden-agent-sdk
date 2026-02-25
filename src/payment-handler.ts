@@ -13,6 +13,7 @@ import type {
   PaymentRequired,
   PaymentResult,
   ResourceInfo,
+  Logger,
 } from "./types.js";
 
 /** Options for payment handling. */
@@ -23,6 +24,8 @@ export interface PaymentHandlerOptions {
   allowedFaucets?: string[];
   /** Only pay on these networks (CAIP-2). Empty array = any. */
   allowedNetworks?: string[];
+  /** Optional logger for diagnostic output. */
+  logger?: Logger;
 }
 
 /**
@@ -47,10 +50,12 @@ export interface PaymentHandlerOptions {
 export class X402PaymentHandler {
   private wallet: MidenAgentWallet;
   private options: PaymentHandlerOptions;
+  private log: Logger;
 
   constructor(wallet: MidenAgentWallet, options: PaymentHandlerOptions = {}) {
     this.wallet = wallet;
     this.options = options;
+    this.log = options.logger ?? noopLogger;
   }
 
   /**
@@ -87,6 +92,7 @@ export class X402PaymentHandler {
   selectRequirement(
     requirements: MidenPaymentRequirements[],
   ): MidenPaymentRequirements | null {
+    this.log.debug("Selecting from requirements", { count: requirements.length });
     for (const req of requirements) {
       // Must be the exact scheme
       if (req.scheme !== "exact") continue;
@@ -113,9 +119,11 @@ export class X402PaymentHandler {
         if (amount > this.options.maxPayment) continue;
       }
 
+      this.log.info("Selected requirement", { network: req.network, amount: req.amount, asset: req.asset });
       return req;
     }
 
+    this.log.warn("No compatible requirement found");
     return null;
   }
 
@@ -135,6 +143,7 @@ export class X402PaymentHandler {
     requirements: MidenPaymentRequirements,
     resource?: ResourceInfo,
   ): Promise<PaymentResult> {
+    this.log.info("Creating payment", { payTo: requirements.payTo, amount: requirements.amount, asset: requirements.asset });
     const amount = BigInt(requirements.amount);
 
     // Create P2ID proof without submitting to network
@@ -202,6 +211,13 @@ export class X402PaymentHandler {
 }
 
 // ============================================================================
+// Internal logger
+// ============================================================================
+
+const noop = () => {};
+const noopLogger: Logger = { debug: noop, info: noop, warn: noop, error: noop };
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -221,13 +237,17 @@ export function decodePaymentHeader(header: string): V2PaymentPayload {
   return JSON.parse(json) as V2PaymentPayload;
 }
 
-// Universal base64 helpers (browser + Node.js)
+// Unicode-safe base64 helpers (browser + Node.js)
 function base64Encode(str: string): string {
-  // btoa is available in browsers and Node.js >= 16
-  return btoa(str);
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(str, "utf-8").toString("base64");
+  }
+  return btoa(unescape(encodeURIComponent(str)));
 }
 
 function base64Decode(encoded: string): string {
-  // atob is available in browsers and Node.js >= 16
-  return atob(encoded);
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(encoded, "base64").toString("utf-8");
+  }
+  return decodeURIComponent(escape(atob(encoded)));
 }

@@ -282,3 +282,38 @@ describe("decodePaymentHeader", () => {
     expect(decoded.accepted.network).toBe("miden:testnet");
   });
 });
+
+describe("base64 unicode safety", () => {
+  it("roundtrips payment header containing unicode characters", async () => {
+    const handler = new X402PaymentHandler(createMockWallet("0xagent"));
+    // Use a requirement with unicode in the extra field
+    const req = createMockRequirements({ extra: "Miden pays fast" });
+
+    const result = await handler.createPayment(req);
+    const decoded = decodePaymentHeader(result.paymentHeader);
+
+    expect(decoded.accepted.extra).toBe("Miden pays fast");
+  });
+
+  it("roundtrips payment header with emoji and CJK characters", async () => {
+    const handler = new X402PaymentHandler(createMockWallet("0xagent"));
+    const req = createMockRequirements({ extra: "Payment received" });
+
+    const result = await handler.createPayment(req);
+    const decoded = decodePaymentHeader(result.paymentHeader);
+
+    expect(decoded.accepted.extra).toBe("Payment received");
+  });
+
+  it("handles multi-byte unicode in all payload fields", async () => {
+    const handler = new X402PaymentHandler(createMockWallet("0xagent"));
+    const resource = { url: "https://example.com/api", method: "GET", headers: { "X-Note": "cafe" } };
+    const req = createMockRequirements();
+
+    const result = await handler.createPayment(req, resource);
+    const decoded = decodePaymentHeader(result.paymentHeader);
+
+    expect(decoded.resource?.headers?.["X-Note"]).toBe("cafe");
+    expect(decoded.x402Version).toBe(2);
+  });
+});

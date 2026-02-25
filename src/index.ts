@@ -27,6 +27,7 @@ export {
 
 // Types
 export type {
+  Logger,
   AgentWalletConfig,
   MidenNetwork,
   FungibleAssetInfo,
@@ -39,3 +40,6 @@ export type {
   PaymentResult,
   MidenFetchOptions,
 } from "./types.js";
+
+// Logger utilities
+export { noopLogger, consoleLogger } from "./types.js";
