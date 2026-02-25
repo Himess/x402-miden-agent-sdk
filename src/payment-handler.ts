@@ -138,14 +138,22 @@ export class X402PaymentHandler {
     const amount = BigInt(requirements.amount);
 
     // Create P2ID proof without submitting to network
-    const { provenTransactionHex, transactionId } =
-      await this.wallet.createP2IDProof(
-        requirements.payTo,
-        requirements.asset,
-        amount,
-        // x402 requires public notes so facilitator can verify
-        "public",
+    let provenTransactionHex: string;
+    let transactionId: string;
+    try {
+      ({ provenTransactionHex, transactionId } =
+        await this.wallet.createP2IDProof(
+          requirements.payTo,
+          requirements.asset,
+          amount,
+          // x402 requires public notes so facilitator can verify
+          "public",
+        ));
+    } catch (err) {
+      throw new Error(
+        `Failed to create P2ID proof: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
 
     // Build the V2 payment payload
     const midenPayload: MidenExactPayload = {

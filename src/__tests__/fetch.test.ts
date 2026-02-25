@@ -120,7 +120,7 @@ describe("midenFetch", () => {
     }
   });
 
-  it("returns synthetic 402 when no compatible scheme found", async () => {
+  it("returns original 402 when no compatible scheme found", async () => {
     const { midenFetch } = await import("../fetch.js");
 
     const body: PaymentRequired = {
@@ -143,9 +143,13 @@ describe("midenFetch", () => {
         maxPayment: 1n,
       });
 
+      // Returns the original 402 response (not a synthetic one)
       expect(response.status).toBe(402);
       const responseBody = await response.json();
-      expect(responseBody.error).toContain("No compatible payment scheme");
+      expect(responseBody.x402Version).toBe(2);
+      expect(responseBody.accepts).toHaveLength(1);
+      // No payment was attempted
+      expect(wallet.createP2IDProof).not.toHaveBeenCalled();
     } finally {
       globalThis.fetch = originalFetch;
     }
