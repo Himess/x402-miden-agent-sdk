@@ -1,0 +1,49 @@
+{
+  "name": "x402-miden-agent-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for AI agents to create private wallets and handle x402 payments on Miden",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "clean": "rimraf dist"
+  },
+  "keywords": [
+    "miden",
+    "x402",
+    "agent",
+    "wallet",
+    "privacy",
+    "zk",
+    "payments",
+    "http-402"
+  ],
+  "author": "Himess",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Himess/x402-miden-agent-sdk"
+  },
+  "dependencies": {
+    "@miden-sdk/miden-sdk": "^0.13.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "rimraf": "^6.0.0"
+  }
+}
