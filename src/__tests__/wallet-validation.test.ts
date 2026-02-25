@@ -59,6 +59,29 @@ describe("MidenAgentWallet input validation", () => {
     wallet.account = fakeAccount;
     wallet._accountId = "0xabc123";
     wallet.log = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
+    wallet.proofTimeoutMs = 120_000;
+    // Create a minimal mutex matching the AsyncMutex interface
+    wallet.mutex = {
+      _locked: false,
+      _queue: [] as (() => void)[],
+      async acquire() {
+        if (!this._locked) {
+          this._locked = true;
+          return () => this._release();
+        }
+        return new Promise<() => void>(resolve => {
+          this._queue.push(() => {
+            this._locked = true;
+            resolve(() => this._release());
+          });
+        });
+      },
+      _release() {
+        const next = this._queue.shift();
+        if (next) next();
+        else this._locked = false;
+      },
+    };
 
     return wallet as InstanceType<typeof MidenAgentWallet>;
   }

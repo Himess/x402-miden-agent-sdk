@@ -29,8 +29,55 @@ import type {
 /** Default Miden testnet RPC endpoint. */
 const DEFAULT_RPC_URL = "https://rpc.testnet.miden.io";
 
+/** Default STARK proof generation timeout in milliseconds (2 minutes). */
+const DEFAULT_PROOF_TIMEOUT_MS = 120_000;
+
 /** Regex for validating hex-encoded IDs (with or without 0x prefix). */
 const HEX_RE = /^(0x)?[0-9a-fA-F]+$/;
+
+// ============================================================================
+// Async Mutex — serializes wallet operations to prevent concurrent state
+// ============================================================================
+
+class AsyncMutex {
+  private _locked = false;
+  private _queue: (() => void)[] = [];
+
+  async acquire(): Promise<() => void> {
+    if (!this._locked) {
+      this._locked = true;
+      return () => this._release();
+    }
+    return new Promise(resolve => {
+      this._queue.push(() => {
+        this._locked = true;
+        resolve(() => this._release());
+      });
+    });
+  }
+
+  private _release() {
+    const next = this._queue.shift();
+    if (next) next();
+    else this._locked = false;
+  }
+}
+
+// ============================================================================
+// Timeout helper
+// ============================================================================
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timeoutId!);
+  }
+}
 
 /**
  * A private wallet for AI agents on Miden.
@@ -54,12 +101,15 @@ export class MidenAgentWallet {
   private account: Account;
   private _accountId: string;
   private log: Logger;
+  private proofTimeoutMs: number;
+  private mutex = new AsyncMutex();
 
-  private constructor(client: WebClient, account: Account, logger?: Logger) {
+  private constructor(client: WebClient, account: Account, logger?: Logger, proofTimeoutMs?: number) {
     this.client = client;
     this.account = account;
     this._accountId = account.id().toString();
     this.log = logger ?? noopLogger;
+    this.proofTimeoutMs = proofTimeoutMs ?? DEFAULT_PROOF_TIMEOUT_MS;
   }
 
   /** The agent's Miden account ID (hex string). */
@@ -70,6 +120,13 @@ export class MidenAgentWallet {
   /** Whether the account uses public storage. */
   get isPublic(): boolean {
     return this.account.isPublic();
+  }
+
+  /**
+   * Returns the stored account ID as a string.
+   */
+  getAccountId(): string {
+    return this._accountId;
   }
 
   /**
@@ -104,7 +161,7 @@ export class MidenAgentWallet {
     // Initial sync to register the account with the network
     await client.syncState();
 
-    const wallet = new MidenAgentWallet(client, account, log);
+    const wallet = new MidenAgentWallet(client, account, log, config.proofTimeoutMs);
     log.info("Agent wallet created", { accountId: wallet.accountId });
     return wallet;
   }
@@ -157,7 +214,7 @@ export class MidenAgentWallet {
       );
     }
 
-    return new MidenAgentWallet(client, account, log);
+    return new MidenAgentWallet(client, account, log, config.proofTimeoutMs);
   }
 
   /**
@@ -200,25 +257,16 @@ export class MidenAgentWallet {
   }
 
   /**
-   * Creates and submits a P2ID payment to a recipient.
+   * Builds a P2ID transaction request by parsing IDs and creating the transaction.
    *
-   * This is the core payment primitive used by the x402 flow.
-   * It creates a P2ID note, proves the transaction locally,
-   * and submits it to the network.
-   *
-   * @param recipientId - Recipient's account ID (hex)
-   * @param faucetId - Token faucet account ID (hex)
-   * @param amount - Amount in token's smallest unit
-   * @param noteType - "public" or "private". Public notes can be verified
-   *   by facilitators. Defaults to "public" for x402 compatibility.
-   * @returns The transaction ID
+   * Shared logic used by both sendPayment and createP2IDProof.
    */
-  async sendPayment(
+  private buildP2IDTransaction(
     recipientId: string,
     faucetId: string,
     amount: bigint,
     noteType: "public" | "private" = "public",
-  ): Promise<string> {
+  ) {
     // Input validation
     if (amount <= 0n) {
       throw new Error("Amount must be positive");
@@ -229,8 +277,6 @@ export class MidenAgentWallet {
     if (!HEX_RE.test(faucetId)) {
       throw new Error("Invalid hex format for faucetId");
     }
-
-    this.log.info("Sending payment", { recipientId, faucetId, amount: amount.toString(), noteType });
 
     let senderAccountId, targetAccountId, faucetAccountId;
     try {
@@ -254,13 +300,50 @@ export class MidenAgentWallet {
       amount,
     );
 
-    const txId: TransactionId = await this.client.submitNewTransaction(
-      senderAccountId,
-      txRequest,
-    );
+    return { senderAccountId, txRequest };
+  }
 
-    this.log.info("Payment sent", { transactionId: txId.toString() });
-    return txId.toString();
+  /**
+   * Creates and submits a P2ID payment to a recipient.
+   *
+   * This is the core payment primitive used by the x402 flow.
+   * It creates a P2ID note, proves the transaction locally,
+   * and submits it to the network.
+   *
+   * @param recipientId - Recipient's account ID (hex)
+   * @param faucetId - Token faucet account ID (hex)
+   * @param amount - Amount in token's smallest unit
+   * @param noteType - "public" or "private". Public notes can be verified
+   *   by facilitators. Defaults to "public" for x402 compatibility.
+   * @returns The transaction ID
+   */
+  async sendPayment(
+    recipientId: string,
+    faucetId: string,
+    amount: bigint,
+    noteType: "public" | "private" = "public",
+  ): Promise<string> {
+    const release = await this.mutex.acquire();
+    try {
+      this.log.info("Sending payment", { recipientId, faucetId, amount: amount.toString(), noteType });
+
+      const { senderAccountId, txRequest } = this.buildP2IDTransaction(
+        recipientId,
+        faucetId,
+        amount,
+        noteType,
+      );
+
+      const txId: TransactionId = await this.client.submitNewTransaction(
+        senderAccountId,
+        txRequest,
+      );
+
+      this.log.info("Payment sent", { transactionId: txId.toString() });
+      return txId.toString();
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -281,65 +364,44 @@ export class MidenAgentWallet {
     amount: bigint,
     noteType: "public" | "private" = "public",
   ): Promise<{ provenTransactionHex: string; transactionId: string }> {
-    // Input validation
-    if (amount <= 0n) {
-      throw new Error("Amount must be positive");
-    }
-    if (!HEX_RE.test(recipientId)) {
-      throw new Error("Invalid hex format for recipientId");
-    }
-    if (!HEX_RE.test(faucetId)) {
-      throw new Error("Invalid hex format for faucetId");
-    }
-    // recipientId is the payTo field — validate it as well
-    if (!HEX_RE.test(recipientId)) {
-      throw new Error("Invalid hex format for payTo");
-    }
-
-    this.log.info("Generating P2ID proof", { recipientId, faucetId, amount: amount.toString(), noteType });
-
-    let senderAccountId, targetAccountId, faucetAccountId;
+    const release = await this.mutex.acquire();
     try {
-      senderAccountId = AccountId.fromHex(this._accountId);
-      targetAccountId = AccountId.fromHex(recipientId);
-      faucetAccountId = AccountId.fromHex(faucetId);
-    } catch (err) {
-      throw new Error(
-        `Invalid account ID: ${err instanceof Error ? err.message : String(err)}`
+      this.log.info("Generating P2ID proof", { recipientId, faucetId, amount: amount.toString(), noteType });
+
+      const { senderAccountId, txRequest } = this.buildP2IDTransaction(
+        recipientId,
+        faucetId,
+        amount,
+        noteType,
       );
+
+      // Execute locally (no network submission)
+      const txResult = await this.client.executeTransaction(
+        senderAccountId,
+        txRequest,
+      );
+
+      // Prove the transaction (generates STARK proof) with timeout
+      const provenTx = await withTimeout(
+        this.client.proveTransaction(txResult),
+        this.proofTimeoutMs,
+        `STARK proof generation timed out after ${this.proofTimeoutMs / 1000} seconds`,
+      );
+
+      // Serialize to bytes then hex
+      const provenTxBytes = provenTx.serialize();
+      const provenTxHex = bytesToHex(provenTxBytes);
+      const txId = provenTx.id().toString();
+
+      this.log.info("P2ID proof generated", { transactionId: txId });
+
+      return {
+        provenTransactionHex: provenTxHex,
+        transactionId: txId,
+      };
+    } finally {
+      release();
     }
-
-    const midenNoteType =
-      noteType === "public" ? NoteType.Public : NoteType.Private;
-
-    const txRequest = this.client.newSendTransactionRequest(
-      senderAccountId,
-      targetAccountId,
-      faucetAccountId,
-      midenNoteType,
-      amount,
-    );
-
-    // Execute locally (no network submission)
-    const txResult = await this.client.executeTransaction(
-      senderAccountId,
-      txRequest,
-    );
-
-    // Prove the transaction (generates STARK proof)
-    const provenTx = await this.client.proveTransaction(txResult);
-
-    // Serialize to bytes then hex
-    const provenTxBytes = provenTx.serialize();
-    const provenTxHex = bytesToHex(provenTxBytes);
-    const txId = provenTx.id().toString();
-
-    this.log.info("P2ID proof generated", { transactionId: txId });
-
-    return {
-      provenTransactionHex: provenTxHex,
-      transactionId: txId,
-    };
   }
 
   /**
@@ -361,11 +423,6 @@ export class MidenAgentWallet {
     throw new Error(
       "waitForTransaction is not yet implemented. Track transaction confirmation manually via syncState().",
     );
-  }
-
-  /** Returns the underlying WebClient for advanced usage. */
-  getClient(): WebClient {
-    return this.client;
   }
 
   /** Terminates the underlying WASM worker. Call when done with the wallet. */

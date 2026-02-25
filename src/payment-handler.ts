@@ -5,6 +5,7 @@
  * and returns the encoded payment header ready to be sent back.
  */
 
+import { z } from "zod";
 import type { MidenAgentWallet } from "./wallet.js";
 import type {
   MidenPaymentRequirements,
@@ -15,6 +16,26 @@ import type {
   ResourceInfo,
   Logger,
 } from "./types.js";
+
+/** Zod schema for validating 402 response bodies. */
+const PaymentRequiredSchema = z.object({
+  x402Version: z.number(),
+  accepts: z.array(z.object({
+    scheme: z.string(),
+    network: z.string(),
+    amount: z.string(),
+    payTo: z.string(),
+    asset: z.string(),
+    maxTimeoutSeconds: z.number().optional(),
+    extra: z.unknown().optional(),
+  })),
+  resource: z.object({
+    url: z.string(),
+    method: z.string(),
+    headers: z.record(z.string(), z.string()).optional(),
+  }).optional(),
+  error: z.string().optional(),
+});
 
 /** Options for payment handling. */
 export interface PaymentHandlerOptions {
@@ -71,10 +92,20 @@ export class X402PaymentHandler {
 
     try {
       const body = await response.json();
-      if (!body || body.x402Version !== 2 || !Array.isArray(body.accepts)) {
+
+      // Validate the response body against the schema
+      const parsed = PaymentRequiredSchema.safeParse(body);
+      if (!parsed.success) {
+        this.log.debug("Invalid 402 response body", { errors: parsed.error.issues });
         return null;
       }
-      return body as PaymentRequired;
+
+      // Check for x402 v2
+      if (parsed.data.x402Version !== 2) {
+        return null;
+      }
+
+      return parsed.data as PaymentRequired;
     } catch {
       return null;
     }

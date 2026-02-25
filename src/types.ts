@@ -53,6 +53,8 @@ export interface AgentWalletConfig {
   storeName?: string;
   /** Optional logger for diagnostic output. */
   logger?: Logger;
+  /** Timeout in milliseconds for STARK proof generation. Defaults to 120000 (2 minutes). */
+  proofTimeoutMs?: number;
 }
 
 /** Known Miden network identifiers. */

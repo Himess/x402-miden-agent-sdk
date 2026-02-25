@@ -13,6 +13,76 @@ const noop = () => {};
 const noopLogger: Logger = { debug: noop, info: noop, warn: noop, error: noop };
 
 /**
+ * Result callback type for tracking payments.
+ * Use with `midenFetchWithCallback` to get notified of payments.
+ */
+export type PaymentCallback = (result: PaymentResult) => void;
+
+/**
+ * Internal implementation of the x402-aware fetch flow.
+ *
+ * Handles 402 responses by creating P2ID payment proofs and retrying.
+ * Both `midenFetch` and `midenFetchWithCallback` delegate to this function.
+ */
+async function midenFetchInternal(
+  wallet: MidenAgentWallet,
+  url: string | URL,
+  options: MidenFetchOptions = {},
+  onPayment?: PaymentCallback,
+): Promise<Response> {
+  const {
+    maxPayment,
+    allowedFaucets,
+    allowedNetworks,
+    dryRun,
+    logger,
+    ...fetchOptions
+  } = options;
+
+  const log: Logger = logger ?? noopLogger;
+
+  // First request — may return 402
+  const response = await fetch(url, fetchOptions);
+
+  // Not a 402, or dry run → return as-is
+  if (response.status !== 402 || dryRun) return response;
+
+  log.info("Received 402 Payment Required", { url: String(url) });
+
+  // Clone before body is consumed by payment handler
+  const responseForParsing = response.clone();
+
+  // Create handler with constraints
+  const handler = new X402PaymentHandler(wallet, {
+    maxPayment,
+    allowedFaucets,
+    allowedNetworks,
+    logger: log,
+  });
+
+  // Try to handle the 402
+  log.info("Attempting payment for 402 response");
+  const result = await handler.handlePaymentRequired(responseForParsing);
+  if (!result) {
+    log.warn("No compatible payment scheme found, returning original 402");
+    // Return original (unconsumed) response so caller can inspect it
+    return response;
+  }
+
+  // Notify callback if provided
+  if (onPayment) {
+    onPayment(result);
+  }
+
+  // Retry with the Payment header
+  log.info("Retrying request with Payment header", { transactionId: result.transactionId });
+  const retryHeaders = new Headers(fetchOptions.headers);
+  retryHeaders.set("Payment", result.paymentHeader);
+
+  return fetch(url, { ...fetchOptions, headers: retryHeaders });
+}
+
+/**
  * Creates an x402-aware fetch function bound to an agent wallet.
  *
  * The returned function behaves like `fetch()` but automatically handles
@@ -58,66 +128,8 @@ export async function midenFetch(
   url: string | URL,
   options: MidenFetchOptions = {},
 ): Promise<Response> {
-  const {
-    maxPayment,
-    allowedFaucets,
-    allowedNetworks,
-    dryRun,
-    logger,
-    ...fetchOptions
-  } = options;
-
-  const log: Logger = logger ?? noopLogger;
-
-  // First request — may return 402
-  const response = await fetch(url, fetchOptions);
-
-  // Not a 402 → return as-is
-  if (response.status !== 402) return response;
-
-  log.info("Received 402 Payment Required", { url: String(url) });
-
-  // Dry run mode — return the 402 without paying
-  if (dryRun) return response;
-
-  // Clone before body is consumed by payment handler
-  const responseForParsing = response.clone();
-
-  // Create handler with constraints
-  const handler = new X402PaymentHandler(wallet, {
-    maxPayment,
-    allowedFaucets,
-    allowedNetworks,
-    logger: log,
-  });
-
-  // Try to handle the 402
-  log.info("Attempting payment for 402 response");
-  const result = await handler.handlePaymentRequired(responseForParsing);
-  if (!result) {
-    log.warn("No compatible payment scheme found, returning original 402");
-    // Return original (unconsumed) response so caller can inspect it
-    return response;
-  }
-
-  // Retry with the Payment header
-  log.info("Retrying request with Payment header", { transactionId: result.transactionId });
-  const retryHeaders = new Headers(fetchOptions.headers);
-  retryHeaders.set("Payment", result.paymentHeader);
-
-  const retryResponse = await fetch(url, {
-    ...fetchOptions,
-    headers: retryHeaders,
-  });
-
-  return retryResponse;
+  return midenFetchInternal(wallet, url, options);
 }
-
-/**
- * Result callback type for tracking payments.
- * Use with `midenFetchWithCallback` to get notified of payments.
- */
-export type PaymentCallback = (result: PaymentResult) => void;
 
 /**
  * Like `midenFetch` but calls a callback when a payment is made.
@@ -140,43 +152,5 @@ export async function midenFetchWithCallback(
   options: MidenFetchOptions = {},
   onPayment: PaymentCallback,
 ): Promise<Response> {
-  const {
-    maxPayment,
-    allowedFaucets,
-    allowedNetworks,
-    dryRun,
-    logger,
-    ...fetchOptions
-  } = options;
-
-  const log: Logger = logger ?? noopLogger;
-
-  const response = await fetch(url, fetchOptions);
-
-  if (response.status !== 402 || dryRun) return response;
-
-  log.info("Received 402 Payment Required (callback mode)", { url: String(url) });
-
-  // Clone before body is consumed by payment handler
-  const responseForParsing = response.clone();
-
-  const handler = new X402PaymentHandler(wallet, {
-    maxPayment,
-    allowedFaucets,
-    allowedNetworks,
-    logger: log,
-  });
-
-  const result = await handler.handlePaymentRequired(responseForParsing);
-  if (!result) return response;
-
-  // Notify callback
-  onPayment(result);
-
-  // Retry with payment
-  log.info("Retrying request with Payment header (callback mode)", { transactionId: result.transactionId });
-  const retryHeaders = new Headers(fetchOptions.headers);
-  retryHeaders.set("Payment", result.paymentHeader);
-
-  return fetch(url, { ...fetchOptions, headers: retryHeaders });
+  return midenFetchInternal(wallet, url, options, onPayment);
 }
