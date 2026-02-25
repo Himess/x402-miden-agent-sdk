@@ -117,7 +117,14 @@ export class MidenAgentWallet {
       config.storeName,
     );
 
-    const accountId = AccountId.fromHex(accountIdHex);
+    let accountId;
+    try {
+      accountId = AccountId.fromHex(accountIdHex);
+    } catch (err) {
+      throw new Error(
+        `Invalid account ID "${accountIdHex}": ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
 
     // Try to get from local store first
     let account = await client.getAccount(accountId);
@@ -198,9 +205,16 @@ export class MidenAgentWallet {
     amount: bigint,
     noteType: "public" | "private" = "public",
   ): Promise<string> {
-    const senderAccountId = AccountId.fromHex(this._accountId);
-    const targetAccountId = AccountId.fromHex(recipientId);
-    const faucetAccountId = AccountId.fromHex(faucetId);
+    let senderAccountId, targetAccountId, faucetAccountId;
+    try {
+      senderAccountId = AccountId.fromHex(this._accountId);
+      targetAccountId = AccountId.fromHex(recipientId);
+      faucetAccountId = AccountId.fromHex(faucetId);
+    } catch (err) {
+      throw new Error(
+        `Invalid account ID: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
 
     const midenNoteType =
       noteType === "public" ? NoteType.Public : NoteType.Private;
@@ -239,9 +253,16 @@ export class MidenAgentWallet {
     amount: bigint,
     noteType: "public" | "private" = "public",
   ): Promise<{ provenTransactionHex: string; transactionId: string }> {
-    const senderAccountId = AccountId.fromHex(this._accountId);
-    const targetAccountId = AccountId.fromHex(recipientId);
-    const faucetAccountId = AccountId.fromHex(faucetId);
+    let senderAccountId, targetAccountId, faucetAccountId;
+    try {
+      senderAccountId = AccountId.fromHex(this._accountId);
+      targetAccountId = AccountId.fromHex(recipientId);
+      faucetAccountId = AccountId.fromHex(faucetId);
+    } catch (err) {
+      throw new Error(
+        `Invalid account ID: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
 
     const midenNoteType =
       noteType === "public" ? NoteType.Public : NoteType.Private;
@@ -285,21 +306,20 @@ export class MidenAgentWallet {
    */
   async waitForTransaction(txId: string, timeoutMs = 60_000): Promise<void> {
     // TODO: Implement proper transaction confirmation polling.
-    // The WebClient doesn't expose a direct waitForTransaction method
-    // for programmatic use (only the wallet adapter has it).
-    // For now, we sync and check if the transaction shows up.
-
+    // The WebClient doesn't expose a direct waitForTransaction method.
+    // For now, we poll sync with a delay until timeout.
+    const pollIntervalMs = 3_000;
     const start = Date.now();
+
     while (Date.now() - start < timeoutMs) {
       await this.sync();
-      // After sync, if the transaction was included, it should be
-      // reflected in the account state. We could check getTransactions()
-      // but that requires TransactionFilter which is complex.
-      // For now, just do one sync and return.
-      return;
-    }
+      // TODO: Check if transaction is confirmed via getTransactions()
+      // once TransactionFilter API is available.
+      // For now, each sync brings state closer to current block.
 
-    throw new Error(`Transaction ${txId} not confirmed within ${timeoutMs}ms`);
+      if (Date.now() - start >= timeoutMs) break;
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
   }
 
   /** Returns the underlying WebClient for advanced usage. */

@@ -72,6 +72,9 @@ export async function midenFetch(
   // Dry run mode — return the 402 without paying
   if (dryRun) return response;
 
+  // Clone before body is consumed by payment handler
+  const responseForParsing = response.clone();
+
   // Create handler with constraints
   const handler = new X402PaymentHandler(wallet, {
     maxPayment,
@@ -80,23 +83,10 @@ export async function midenFetch(
   });
 
   // Try to handle the 402
-  const result = await handler.handlePaymentRequired(response);
+  const result = await handler.handlePaymentRequired(responseForParsing);
   if (!result) {
-    // Can't pay (no compatible scheme, amount too high, etc.)
-    // Return the original 402 response
-    // Note: the original response body was already consumed by parsePaymentRequired,
-    // so we create a synthetic response with the error info
-    return new Response(
-      JSON.stringify({
-        error: "No compatible payment scheme found",
-        x402Version: 2,
-      }),
-      {
-        status: 402,
-        statusText: "Payment Required",
-        headers: { "Content-Type": "application/json" },
-      },
-    );
+    // Return original (unconsumed) response so caller can inspect it
+    return response;
   }
 
   // Retry with the Payment header
@@ -150,13 +140,16 @@ export async function midenFetchWithCallback(
 
   if (response.status !== 402 || dryRun) return response;
 
+  // Clone before body is consumed by payment handler
+  const responseForParsing = response.clone();
+
   const handler = new X402PaymentHandler(wallet, {
     maxPayment,
     allowedFaucets,
     allowedNetworks,
   });
 
-  const result = await handler.handlePaymentRequired(response);
+  const result = await handler.handlePaymentRequired(responseForParsing);
   if (!result) return response;
 
   // Notify callback
